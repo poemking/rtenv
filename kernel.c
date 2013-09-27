@@ -1,7 +1,9 @@
 #include "stm32f10x.h"
+
 #include "RTOSConfig.h"
 
 #include "syscall.h"
+#include "command.h"
 
 #include <stddef.h>
 
@@ -55,7 +57,7 @@ void puts(char *s)
 #define PATH_MAX   32 /* Longest absolute path */
 #define PIPE_LIMIT (TASK_LIMIT * 2)
 
-#define PATHSERVER_FD (TASK_LIMIT + 3) 
+#define PATHSERVER_FD (TASK_LIMIT + 3)
 	/* File descriptor of pipe to pathserver */
 
 #define PRIORITY_DEFAULT 20
@@ -105,7 +107,7 @@ struct task_control_block {
     struct task_control_block  *next;
 };
 
-/* 
+/*
  * pathserver assumes that all files are FIFOs that were registered
  * with mkfifo.  It also assumes a global tables of FDs shared by all
  * processes.  It would have to get much smarter to be generally useful.
@@ -253,7 +255,7 @@ void greeting()
 	}
 }
 
-void echo()
+/*void echo()
 {
 	int fdout, fdin;
 	char c;
@@ -264,7 +266,7 @@ void echo()
 		read(fdin, &c, 1);
 		write(fdout, &c, 1);
 	}
-}
+}*/
 
 void rs232_xmit_msg_task()
 {
@@ -317,12 +319,13 @@ void queue_str_task2()
 void serial_readwrite_task()
 {
 	int fdout, fdin;
+
 	char str[100];
 	char ch;
 	int curr_char;
 	int done;
 
-	fdout = mq_open("/tmp/mqueue/out", 0);
+    fdout = mq_open("/tmp/mqueue/out", 0);
 	fdin = open("/dev/tty0/in", 0);
 
 	/* Prepare the response message to be queued. */
@@ -358,6 +361,227 @@ void serial_readwrite_task()
 	}
 }
 
+char* itoa(int value, char* str)//only support base=10
+{
+    int base = 10;
+    int divideNum = base;
+    int i=0;
+    while(value/divideNum > 0)
+    {
+        divideNum*=base;
+    }
+    if(value < 0)
+    {
+        str[0] = '-';
+        i++;
+    }
+    while(divideNum/base > 0)
+    {
+        divideNum/=base;
+        str[i++]=value/divideNum+48;
+        value%=divideNum;
+    }
+    str[i]='\0';
+    return str;
+
+}
+
+void ps(char splitInput[][20], int splitNum)
+{
+    int fdout = mq_open("/tmp/mqueue/out", 0);
+    const struct task_control_block tasks[TASK_LIMIT];
+    int taskCount,i;
+    getProcessInfo(tasks,&taskCount);
+    char str[10];
+    write(fdout, "Pid\tStatus\t\tPriority\n\r", 24);
+    for(i = 0; i < taskCount; i++)
+    {
+        itoa(tasks[i].pid, str);
+        write(fdout, str, strlen(str)+1);
+        write(fdout, "\t", 2);
+        switch(tasks[i].status)
+        {
+            case TASK_READY:
+                write(fdout, "TASK READY\t", 12);
+                break;
+            case TASK_WAIT_READ:
+                write(fdout, "TASK WAIT READ\t", 16);
+                break;
+            case TASK_WAIT_WRITE:
+                write(fdout, "TASK WAIT WRITE\t", 17);
+                break;
+            case TASK_WAIT_INTR:
+                write(fdout, "TASK WAIT INTR\t", 16);
+                break;
+            case TASK_WAIT_TIME:
+                write(fdout, "TASK WAIT TIME\t", 16);
+                break;
+            default:
+                break;
+        }
+        itoa(tasks[i].priority, str);
+        write(fdout, str, strlen(str)+1);
+        write(fdout, "\n\r",3);
+    }
+}
+
+void echo(char splitInput[][20], int splitNum)
+{
+    int fdout = mq_open("/tmp/mqueue/out", 0);
+    int i=1;
+    while(splitInput[i][0] == '-' && i < splitNum)i++;
+    for(; i < splitNum; i++)
+    {
+        write(fdout, splitInput[i], strlen(splitInput[i])+1);
+        write(fdout, " ", 2);
+    }
+    write(fdout, "\n", 2);
+}
+
+void hello(char splitInput[][20], int splitNum)
+{
+    int fdout = mq_open("/tmp/mqueue/out", 0);
+    char *str = "hello~see u next time \n";
+    write(fdout, str, strlen(str)+1);
+}
+
+int CommandNO(char* cmd)
+{
+    int i;
+    for(i = 0; i < CMDNUM; i++)
+    {
+        if(strcmp(cmd,cmdTable[i])==0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+//Handle input string
+void HandleInput(char* input)
+{
+    int i, j;
+    char splitStr[50][20];/*splitStr[0]:command
+                            splitStr[1]~splitStr[k]:options
+                            splitStr[k+1]~splitStr[n]:arguments
+                          */
+    int splitNum = 0;
+    int cmdNO;
+    int fdout = mq_open("/tmp/mqueue/out", 0);
+    for(i=0, j=0; input[i]!='\0' && j < 20; i++)
+    {
+        if(input[i] == ' ')
+        {
+            if(j != 0)
+            {
+                splitStr[splitNum++][j] = '\0';
+                j = 0;
+            }
+            continue;
+        }
+        splitStr[splitNum][j] = input[i];
+        j++;
+    }
+    splitStr[splitNum++][j] = '\0';
+
+    cmdNO=CommandNO(splitStr[0]);
+    switch(cmdNO)
+    {
+        case HELP:
+            break;
+        case ECHO:
+            echo(splitStr,splitNum);
+            break;
+        case PS:
+            ps(splitStr,splitNum);
+            break;
+        case HELLO:
+            hello(splitStr,splitNum);
+            break;
+        default:
+            write(fdout, splitStr[0], strlen(splitStr[0])+1);
+            write(fdout, ": command not found\n", 21);
+            break;
+    }
+}
+
+void Shell()
+{
+	int fdout, fdin;
+	char str[100];
+	char* ch[]={'0','\0'};
+
+	int curr_char;
+	int done;
+	char pos[] = "\rshell:~$ ";
+	char newLine[] = "\n\r";
+
+    fdout = mq_open("/tmp/mqueue/out", 0);
+	fdin = open("/dev/tty0/in", 0);
+
+	while (1)
+    {
+        write(fdout, pos, strlen(pos)+1);
+		curr_char = 0;
+		done = 0;
+		str[curr_char] = '\0';
+		do
+        {
+			/* Receive a byte from the RS232 port (this call will
+			 * block). */
+			read(fdin, ch, 1);
+
+			/* If the byte is an end-of-line type character, then
+			 * finish the string and inidcate we are done.
+			 */
+			if (curr_char >= 98 || (ch[0] == '\r') || (ch[0] == '\n'))
+            {
+				str[curr_char] = '\0';
+				done = -1;
+				/* Otherwise, add the character to the
+				 * response string. */
+			}
+			else if(ch[0] == 127)//press the backspace key
+            {
+                if(curr_char!=0)
+                {
+                    curr_char--;
+                    write(fdout, "\b \b", 4);
+                }
+            }
+            else if(ch[0] == 27)//press up, down, left, right, home, page up, delete, end, page down
+            {
+                read(fdin, ch, 1);
+                if(ch[0] != '[')
+                {
+                    str[curr_char++] = ch;
+                    write(fdout, ch, 2);
+                }
+                else
+                {
+                    read(fdin, ch[0], 1);
+                    if(ch[0] >= '1' && ch[0] <= '6')
+                    {
+                        read(fdin, ch, 1);
+                    }
+                }
+            }
+			else
+            {
+				str[curr_char++] = ch[0];
+				write(fdout, ch, 2);
+			}
+		} while (!done);
+        write(fdout, newLine, strlen(newLine)+1);
+        if(strlen(str)>0)
+        {
+            HandleInput(str);
+        }
+	}
+}
+
+
 void first()
 {
 	setpriority(0, 0);
@@ -366,9 +590,10 @@ void first()
 	if (!fork()) setpriority(0, 0), serialout(USART2, USART2_IRQn);
 	if (!fork()) setpriority(0, 0), serialin(USART2, USART2_IRQn);
 	if (!fork()) rs232_xmit_msg_task();
-	if (!fork()) setpriority(0, PRIORITY_DEFAULT - 10), queue_str_task1();
-	if (!fork()) setpriority(0, PRIORITY_DEFAULT - 10), queue_str_task2();
-	if (!fork()) setpriority(0, PRIORITY_DEFAULT - 10), serial_readwrite_task();
+	//if (!fork()) setpriority(0, PRIORITY_DEFAULT - 10), queue_str_task1();
+	//if (!fork()) setpriority(0, PRIORITY_DEFAULT - 10), queue_str_task2();
+	//if (!fork()) setpriority(0, PRIORITY_DEFAULT - 10), serial_readwrite_task();
+	if (!fork()) setpriority(0, PRIORITY_DEFAULT - 10), Shell();
 
 	setpriority(0, PRIORITY_LIMIT);
 
@@ -790,6 +1015,17 @@ int main()
 				tasks[current_task].status = TASK_WAIT_TIME;
 			}
 			break;
+        case 0xa:
+            {
+                struct task_control_block* tempTasks=tasks[current_task].stack->r0;
+                for(i = 0; i < task_count; i++)
+                {
+                    tempTasks[i]=tasks[i];
+                }
+                int* taskCount=tasks[current_task].stack->r1;
+                *taskCount=task_count;
+            }
+            break;
 		default: /* Catch all interrupts */
 			if ((int)tasks[current_task].stack->r7 < 0) {
 				unsigned int intr = -tasks[current_task].stack->r7 - 16;
